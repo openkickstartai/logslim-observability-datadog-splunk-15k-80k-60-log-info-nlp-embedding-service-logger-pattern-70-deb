@@ -4,7 +4,8 @@ import json
 import click
 from rich.console import Console
 from rich.table import Table
-from logslim import analyze, DEFAULT_RATE
+from logslim import analyze, analyze_with_store, DEFAULT_RATE
+
 
 console = Console()
 
@@ -13,8 +14,10 @@ console = Console()
 @click.argument('logfile', type=click.Path(exists=True), required=False)
 @click.option('--rate', default=DEFAULT_RATE, type=float, help='Cost per GB ingested in USD (default: 0.10 for Datadog)')
 @click.option('--top', default=15, type=int, help='Show top N patterns')
-@click.option('--json-out', is_flag=True, help='Output raw JSON for CI/CD pipelines')
 @click.option('--min-noise', default=0, type=float, help='Only show patterns with noise score >= threshold')
+@click.option('--db-path', default=None, type=click.Path(), help='DuckDB file path (default: ~/.logslim/cache.duckdb)')
+def main(logfile, rate, top, json_out, min_noise, db_path):
+
 def main(logfile, rate, top, json_out, min_noise):
     """LogSlim — Find which log patterns are burning your observability budget.
 
@@ -27,7 +30,8 @@ def main(logfile, rate, top, json_out, min_noise):
         lines = sys.stdin.readlines()
     else:
         console.print("[red]Error:[/red] Provide a log file or pipe logs via stdin.")
-        console.print("  Usage: python cli.py app.log")
+    result = analyze_with_store(lines, rate_per_gb=rate, db_path=db_path, source_file=logfile)
+
         console.print("         cat logs/*.log | python cli.py")
         raise SystemExit(1)
     result = analyze(lines, rate_per_gb=rate)

@@ -121,3 +121,77 @@ def _recommend(patterns):
                          'reason': f"{p['field_count']} fields — trim unused to cut payload size",
                          'est_savings_pct': round(p['pct'] * 0.3, 1), 'pattern': p['pattern'][:80]})
     return recs
+
+
+def analyze_with_store(lines, rate_per_gb=DEFAULT_RATE, db_path=None, source_file=None):
+    """Analyze logs — uses DuckDB for large datasets (>=50MB) or when db_path is set, in-memory otherwise."""
+    sample_size = min(len(lines), 1000)
+    if sample_size == 0:
+        return analyze(lines, rate_per_gb=rate_per_gb)
+
+    sample_bytes = sum(len(l.encode('utf-8', errors='replace')) for l in lines[:sample_size])
+    estimated_total = (sample_bytes / sample_size) * len(lines)
+
+    if estimated_total < 50 * 1024 * 1024 and db_path is None:
+        return analyze(lines, rate_per_gb=rate_per_gb)
+
+    from storage import LogStore
+    store = LogStore(db_path=db_path)
+    store.clear()
+
+    records = []
+    for raw in lines:
+        parsed = parse_line(raw)
+        if parsed is None:
+            continue
+        pattern = normalize(parsed['msg'])
+        fp = hashlib.md5(pattern.encode()).hexdigest()
+        records.append({
+            'fingerprint': fp,
+            'service': parsed['service'],
+            'level': parsed['level'],
+            'raw_size_bytes': parsed['raw_bytes'],
+            'pattern': pattern,
+            'timestamp': None,
+            'source_file': source_file or '',
+        })
+
+    store.ingest(records)
+    top = store.top_patterns(limit=1000)
+    service_costs = store.cost_by_service(price_per_gb=rate_per_gb)
+    total_bytes = store.con.execute("SELECT COALESCE(SUM(raw_size_bytes), 0) FROM logs").fetchone()[0]
+
+    patterns_out = []
+    for p in top:
+        pct = p['pct_of_total']
+        noise_score = 0
+        if pct > 10:
+            noise_score += 40
+        elif pct > 5:
+            noise_score += 25
+        elif pct > 1:
+            noise_score += 10
+        pat_lower = p['pattern'].lower()
+        if any(kw in pat_lower for kw in NOISE_KEYWORDS):
+            noise_score += 20
+        patterns_out.append({
+            'fingerprint': hashlib.md5(p['pattern'].encode()).hexdigest(),
+            'pattern': p['pattern'],
+            'count': p['count'],
+            'total_bytes': p['total_bytes'],
+            'pct_of_total': p['pct_of_total'],
+            'services': p['services'],
+            'noise_score': round(min(noise_score, 100), 1),
+            'cost_usd': round(p['total_bytes'] / 1e9 * rate_per_gb, 4),
+        })
+
+    store.close()
+
+    return {
+        'patterns': patterns_out,
+        'pattern_count': len(patterns_out),
+        'total_bytes': total_bytes,
+        'total_cost_usd': round(total_bytes / 1e9 * rate_per_gb, 4),
+        'rate_per_gb': rate_per_gb,
+        'service_costs': service_costs,
+    }
